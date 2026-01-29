@@ -1,0 +1,190 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-5">
+        <div class="card border-0 shadow-sm rounded-4 p-4 mb-4">
+            <h4 class="fw-bold mb-3">Upload Media</h4>
+            <p class="text-muted small">Select the file type you want to analyze with Motherscare AI.</p>
+            
+            <div class="d-grid gap-3">
+                <button class="btn btn-outline-primary py-3 rounded-3" onclick="selectFile('image')">
+                    <i class="bi bi-image"></i> 🖼️ Image Analysis
+                </button>
+                <button class="btn btn-outline-danger py-3 rounded-3" onclick="selectFile('video')">
+                    <i class="bi bi-play-circle"></i> 🎥 Video Analysis
+                </button>
+                <button class="btn btn-outline-success py-3 rounded-3" onclick="selectFile('audio')">
+                    <i class="bi bi-mic"></i> 🎵 Audio Analysis
+                </button>
+            </div>
+            <input type="file" id="mediaInput" hidden onchange="doUpload()">
+        </div>
+    </div>
+
+    <div class="col-md-7">
+        <div class="card border-0 shadow-sm rounded-4 p-4" style="min-height: 350px;">
+            <h4 class="fw-bold mb-3">AI Analysis Result</h4>
+            <div id="statusPlaceholder" class="text-center mt-5">
+                <div class="text-muted">
+                    <i class="display-1 bi bi-cloud-arrow-up"></i>
+                    <p class="mt-3">Upload a file to see real-time AI results here.</p>
+                </div>
+            </div>
+            
+            <div id="resultArea" style="display: none;">
+                <div class="alert alert-info d-flex align-items-center" id="processingAlert">
+                    <div class="spinner-border spinner-border-sm me-3"></div>
+                    <strong>Lambda is processing... Please wait.</strong>
+                </div>
+                <div id="finalOutput" class="bg-dark text-success p-3 rounded-3 small shadow-inner" style="max-height: 400px; overflow-y: auto;">
+                    </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentType = '';
+function selectFile(type) { 
+    currentType = type;
+    const input = document.getElementById('mediaInput');
+    input.accept = type + "/*";
+    input.click(); 
+}
+
+async function doUpload() {
+    const file = document.getElementById('mediaInput').files[0];
+    const statusPlaceholder = document.getElementById('statusPlaceholder');
+    const resultArea = document.getElementById('resultArea');
+    const finalOutput = document.getElementById('finalOutput');
+    const processingAlert = document.getElementById('processingAlert');
+
+    if(!file) return;
+
+    // UI Reset
+    statusPlaceholder.style.display = 'none';
+    resultArea.style.display = 'block';
+    finalOutput.innerText = 'Uploading to S3...';
+    processingAlert.style.display = 'flex';
+
+    let fd = new FormData();
+    fd.append('file', file);
+
+    try {
+        const res = await fetch('/upload/', {
+            method: 'POST',
+            body: fd,
+            headers: {'X-CSRFToken': '{{ csrf_token }}'}
+        });
+        const data = await res.json();
+        
+        if(data.success) {
+            finalOutput.innerText = "File uploaded to: " + data.key + "\\nWaiting for AI analysis...";
+            pollForResult(data.key);
+        } else {
+            finalOutput.innerText = "Error: " + data.error;
+        }
+    } catch(e) { 
+        finalOutput.innerText = "Upload failed."; 
+    }
+}
+
+async function pollForResult(fileKey) {
+    const finalOutput = document.getElementById('finalOutput');
+    const processingAlert = document.getElementById('processingAlert');
+    
+    // Har 3 seconds mein check karega
+    const interval = setInterval(async () => {
+        try {
+            const res = await fetch(`/check-result/?key=${fileKey}`);
+            const result = await res.json();
+
+            // Check if Step Function execution is successful
+            if (result.status === 'SUCCEEDED') {
+                clearInterval(interval); // Polling stop karein
+                
+                // 1. "Lambda is processing" neela box hide karein
+                processingAlert.classList.add('d-none'); 
+
+                // 2. Data Extraction (Targeting 'final_output' from your S3 JSON)
+                const mainData = result.output.final_output || result.output;
+                const triage = mainData.triage || {};
+                const doctors = mainData.doctors?.nearby_doctors || [];
+                
+                // 3. Triage Severity Color Logic
+                let badgeClass = 'bg-success'; 
+                if (triage.triage_score >= 4) badgeClass = 'bg-danger';
+                else if (triage.triage_score >= 3) badgeClass = 'bg-warning text-dark';
+
+                // 4. Building the Medical Report UI
+                let htmlContent = `
+                    <div class="card border-0 bg-light p-3 mb-4 shadow-sm animate__animated animate__fadeIn">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="fw-bold m-0 text-primary"><i class="bi bi- clipboard2-pulse"></i> AI Clinical Report</h5>
+                            <span class="badge ${badgeClass} rounded-pill px-3 py-2">Triage Score: ${triage.triage_score || 'N/A'}</span>
+                        </div>
+                        <div class="mb-3">
+                            <small class="text-uppercase text-muted fw-bold" style="font-size: 0.7rem;">Specialty Recommended</small>
+                            <p class="m-0 fw-bold">${triage.recommended_specialty || 'General Physician'}</p>
+                        </div>
+                        <div class="p-3 bg-white rounded-3 border-start border-4 border-primary">
+                            <p class="text-dark mb-0" style="font-size: 0.95rem; line-height: 1.6;">
+                                ${triage.summary || 'Analysis complete. Please refer to the doctor below.'}
+                            </p>
+                        </div>
+                    </div>
+
+                    <h6 class="fw-bold mb-3"><i class="bi bi-geo-alt-fill text-danger"></i> Nearby Doctors for Consultation:</h6>
+                    <div class="row g-2">
+                `;
+
+                // 5. Doctors List with WhatsApp Booking Logic
+                if (doctors.length > 0) {
+                    doctors.forEach(doc => {
+                        // WhatsApp Message Formatting
+                        const waMsg = encodeURIComponent(`Hi ${doc.DoctorName}, I used Motherscare AI. My Triage Score is ${triage.triage_score}. I need to book a consultation.`);
+                        const waUrl = `https://wa.me/917668352855?text=${waMsg}`; // Replace with actual doctor phone if available
+
+                        htmlContent += `
+                            <div class="col-12">
+                                <div class="card border-0 shadow-sm p-3 mb-2 rounded-3">
+                                    <div class="d-flex align-items-center">
+                                        <div class="rounded-circle bg-primary-subtle text-primary p-2 me-3 d-flex align-items-center justify-content-center" style="width: 45px; height: 45px;">
+                                            <i class="bi bi-person-badge-fill fs-5"></i>
+                                        </div>
+                                        <div class="flex-grow-1">
+                                            <h6 class="m-0 fw-bold">${doc.DoctorName}</h6>
+                                            <small class="text-muted"><i class="bi bi-geo-alt"></i> ${doc.ClinicAddress}</small>
+                                        </div>
+                                        <a href="${waUrl}" target="_blank" class="btn btn-sm btn-success px-3 rounded-pill shadow-sm">
+                                            <i class="bi bi-whatsapp"></i> Book
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                } else {
+                    htmlContent += `<div class="col-12 text-center text-muted py-4">No specialists found in your area.</div>`;
+                }
+
+                htmlContent += `</div>`;
+
+                // 6. Final UI Display Update
+                finalOutput.classList.remove('bg-dark', 'text-success');
+                finalOutput.classList.add('bg-white', 'text-dark');
+                finalOutput.innerHTML = htmlContent;
+
+            } else if (result.status === 'FAILED') {
+                clearInterval(interval);
+                processingAlert.classList.replace('alert-info', 'alert-danger');
+                processingAlert.innerHTML = "<strong>❌ Analysis Failed:</strong> Error in Step Function execution.";
+            }
+        } catch (e) { 
+            console.error("Polling Error:", e); 
+        }
+    }, 3000);
+}
+</script>
+{% endblock %}
