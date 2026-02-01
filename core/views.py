@@ -36,8 +36,8 @@ def upload_view(request):
         folder = f.content_type.split('/')[0] + "s"
         key = f"uploads/{int(time.time())}-{f.name}"
         try:
-            s3 = boto3.client('s3', aws_access_key_id=ACCESS_KEY, 
-                              aws_secret_access_key=SECRET_KEY, region_name=REGION)
+            s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, 
+                              aws_secret_access_key=AWS_SECRET_ACCESS_KEY, region_name=REGION)
             s3.upload_fileobj(f, BUCKET_NAME, key, ExtraArgs={'ContentType': f.content_type})
             return JsonResponse({'success': True, 'key': key})
         except Exception as e:
@@ -48,9 +48,9 @@ def upload_view(request):
 def check_result(request):
     file_key = request.GET.get('key')
     result_key = file_key.replace('uploads/', 'results/') + "_output.json"
-    
-    s3 = boto3.client('s3', aws_access_key_id=ACCESS_KEY, aws_secret_access_key=SECRET_KEY, region_name=REGION)
-    
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY, region_name=REGION)
+
     try:
         response = s3.get_object(Bucket="motherscare", Key=result_key)
         data = json.loads(response['Body'].read().decode('utf-8'))
